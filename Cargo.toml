@@ -4,3 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+candle-core = { version = "0.8.1", features = ["metal"] }
+candle-nn = { version = "0.8.1", features = ["metal"] }
+ndarray = "0.14"
+ndarray-linalg = { version = "0.13", features = ["openblas-static"] }
+rand = { version = "0.8.5", features = ["std_rng"] }
+
+[[bin]]
+name = "label_propagation"
+path = "src/ch02/label_propagation/main.rs"
+
+[[bin]]
+name = "matrix_factorization"
+path = "src/ch02/matrix_factorization/main.rs"
+
+[[bin]]
+name = "layers"
+path = "src/common/layers.rs"
