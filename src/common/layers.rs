@@ -366,7 +366,7 @@ fn print_train_data(
 
 fn main() {
     // デバイス
-    let device = Device::cuda_if_available(0).unwrap();
+    let device = Device::new_cuda(0).unwrap();
     println!("device: {:?}", device);
     // パラメータ
     let var_map = VarMap::new();
