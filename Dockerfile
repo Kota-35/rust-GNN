@@ -15,6 +15,7 @@ RUN apt-get update && \
         ca-certificates \
         build-essential \
         pkg-config \
+        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # (句) Rust のインストール (rustup)
@@ -24,11 +25,11 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # (句) 作業ディレクトリ
 WORKDIR /rust-gnn
 
-# (句) Cargo.{toml,lock} を先にコピーし、依存関係だけダウンロード
+# (句) Cargo.{toml,lock} を先にコピーして依存関係だけダウンロード
 COPY Cargo.toml Cargo.lock ./
 RUN cargo fetch
 
-# (句) ソースをコピー
+# (句) プロジェクトソースをコピー
 COPY . .
 
 # (句) リリースビルド
@@ -46,11 +47,11 @@ RUN cargo build --release
 ############################################
 FROM ubuntu:${UBUNTU_VERSION}
 
-# (句) 作業ディレクトリを /root/ にする
+# (句) 作業ディレクトリを /root/ に設定
 WORKDIR /root/
 
 # ----------------------------------------------------
-# (句) libcuda ダミーパッケージを作成
+# (句) libcuda ダミーパッケージの作成
 # ----------------------------------------------------
 RUN printf "\
 Package: libcuda1-dummy\n\
@@ -115,7 +116,7 @@ RUN gpg --dearmor -o /etc/apt/trusted.gpg.d/lambda.gpg < lambda.gpg && \
     rm lambda.gpg
 
 # ----------------------------------------------------
-# (句) Lambda Labs リポジトリの追加
+# (句) Lambda Labs リポジトリを追加
 # ----------------------------------------------------
 RUN printf "\
 deb http://archive.lambdalabs.com/ubuntu $(lsb_release -cs) main\n\
@@ -128,7 +129,7 @@ Pin-Priority: 1001\n\
 " > /etc/apt/preferences.d/lambda
 
 # ----------------------------------------------------
-# (句) lambda-stack-cuda のインストール
+# (句) lambda-stack-cuda をインストール
 # ----------------------------------------------------
 RUN apt-get update && \
     echo "cudnn cudnn/license_preseed select ACCEPT" | debconf-set-selections && \
@@ -137,7 +138,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # ----------------------------------------------------
-# (句) pip の設定変更 (system packages を壊す操作を許可)
+# (句) pip の設定 (system packages を壊す操作を許可)
 # ----------------------------------------------------
 RUN printf "\
 [global]\n\
@@ -145,14 +146,14 @@ break-system-packages = true\n\
 " > /etc/pip.conf
 
 # ----------------------------------------------------
-# (句) NVIDIA Docker 用の環境変数を設定
+# (句) NVIDIA Docker 用の環境変数
 # ----------------------------------------------------
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV NVIDIA_REQUIRE_CUDA="cuda>=12.4"
 
 # ----------------------------------------------------
-# (句) ビルドステージからの成果物をコピー
+# (句) ビルドステージから成果物をコピー
 # ----------------------------------------------------
 COPY --from=builder /rust-gnn/target/release/label_propagation     /usr/local/bin/label_propagation
 COPY --from=builder /rust-gnn/target/release/matrix_factorization /usr/local/bin/matrix_factorization
