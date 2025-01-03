@@ -1,4 +1,9 @@
 # ==================================
+# (句) すべてのステージで使用する引数を最上部で宣言する
+# ==================================
+ARG UBUNTU_VERSION=22.04
+
+# ==================================
 # 1. Rust ビルド用ステージ
 # ==================================
 FROM rust:1.79.0 AS builder
@@ -24,18 +29,16 @@ RUN rm -f target/release/deps/layers*
 # (句) 再度アプリケーションをリリースビルド
 RUN cargo build --release
 
-
 # ==================================
-# 2. Lambda Stack + Rust 実行ステージ
+# 2. Ubuntu イメージ + Lambda Stack
 # ==================================
-ARG UBUNTU_VERSION=22.04
 FROM ubuntu:${UBUNTU_VERSION}
 
 # (句) 作業ディレクトリを /root/ に設定
 WORKDIR /root/
 
 # ----------------------------
-# (句) libcuda のダミーパッケージを作成
+# (句) libcuda ダミーパッケージを作成
 # ----------------------------
 RUN printf "\
 Package: libcuda1-dummy\n\
@@ -55,7 +58,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # ----------------------------
-# (句) ツールのインストール (lsb-release, gnupg)
+# (句) lsb-release, gnupg のインストール
 # ----------------------------
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install --yes lsb-release gnupg && \
@@ -122,7 +125,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # ----------------------------
-# (句) pip の設定変更 (system packages 上書き許可)
+# (句) pip の設定変更 (system packages を壊す操作を許可)
 # ----------------------------
 RUN printf "\
 [global]\n\
@@ -132,16 +135,16 @@ break-system-packages = true\n\
 # ----------------------------
 # (句) NVIDIA Docker 用の環境変数
 # ----------------------------
-ENV NVIDIA_VISIBLE_DEVICES all
-ENV NVIDIA_DRIVER_CAPABILITIES compute,utility
-ENV NVIDIA_REQUIRE_CUDA "cuda>=12.4"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_REQUIRE_CUDA="cuda>=12.4"
 
 # ----------------------------
-# (句) Rust ビルド成果物のコピー
+# (句) Rust ビルドステージからの成果物をコピー
 # ----------------------------
-COPY --from=builder /rust-gnn/target/release/label_propagation /usr/local/bin/label_propagation
+COPY --from=builder /rust-gnn/target/release/label_propagation     /usr/local/bin/label_propagation
 COPY --from=builder /rust-gnn/target/release/matrix_factorization /usr/local/bin/matrix_factorization
-COPY --from=builder /rust-gnn/target/release/layers /usr/local/bin/layers
+COPY --from=builder /rust-gnn/target/release/layers               /usr/local/bin/layers
 
 # ----------------------------
 # (句) コンテナ起動時に実行するコマンド
