@@ -1,45 +1,57 @@
-# ==================================
-# (句) すべてのステージで使用する引数を最上部で宣言する
-# ==================================
+############################################
+# (句) すべてのビルドで使用する引数
+############################################
 ARG UBUNTU_VERSION=22.04
 
-# ==================================
-# 1. Rust ビルド用ステージ
-# ==================================
-FROM rust:1.79.0 AS builder
+############################################
+# 1. ビルドステージ (CUDA + Rust)
+############################################
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS builder
 
-# (句) rust-gnn ディレクトリで作業を行う
+# (句) 必要なツールをインストール
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+        curl \
+        ca-certificates \
+        build-essential \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# (句) Rust のインストール (rustup)
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# (句) 作業ディレクトリ
 WORKDIR /rust-gnn
 
-# (句) Cargo.{toml,lock} をコピーして依存関係を取得
+# (句) Cargo.{toml,lock} を先にコピーし、依存関係だけダウンロード
 COPY Cargo.toml Cargo.lock ./
 RUN cargo fetch
 
-# (句) プロジェクト全体をコピー
+# (句) ソースをコピー
 COPY . .
 
-# (句) リリースビルドを行う
+# (句) リリースビルド
 RUN cargo build --release
 
-# (句) 余分なアプリケーションのバイナリを削除
+# (句) 余分なバイナリを削除して再ビルド
 RUN rm -f target/release/deps/label_propagation*
 RUN rm -f target/release/deps/matrix_factorization*
 RUN rm -f target/release/deps/layers*
-
-# (句) 再度アプリケーションをリリースビルド
 RUN cargo build --release
 
-# ==================================
-# 2. Ubuntu イメージ + Lambda Stack
-# ==================================
+
+############################################
+# 2. 最終ステージ (Lambda Stack CUDA)
+############################################
 FROM ubuntu:${UBUNTU_VERSION}
 
-# (句) 作業ディレクトリを /root/ に設定
+# (句) 作業ディレクトリを /root/ にする
 WORKDIR /root/
 
-# ----------------------------
+# ----------------------------------------------------
 # (句) libcuda ダミーパッケージを作成
-# ----------------------------
+# ----------------------------------------------------
 RUN printf "\
 Package: libcuda1-dummy\n\
 Maintainer: Lambda Labs <software@lambdalabs.com>\n\
@@ -57,16 +69,16 @@ RUN apt-get update && \
     apt-get remove --yes --purge --autoremove equivs && \
     rm -rf /var/lib/apt/lists/*
 
-# ----------------------------
+# ----------------------------------------------------
 # (句) lsb-release, gnupg のインストール
-# ----------------------------
+# ----------------------------------------------------
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install --yes lsb-release gnupg && \
     rm -rf /var/lib/apt/lists/*
 
-# ----------------------------
+# ----------------------------------------------------
 # (句) Lambda Labs 公開鍵の設定
-# ----------------------------
+# ----------------------------------------------------
 RUN printf -- "\
 -----BEGIN PGP PUBLIC KEY BLOCK-----\n\
 \n\
@@ -102,9 +114,9 @@ vcAqOJpavozl4MwEXd0WBT7cDfmR/xz/tZkuK3TiVp9H\n\
 RUN gpg --dearmor -o /etc/apt/trusted.gpg.d/lambda.gpg < lambda.gpg && \
     rm lambda.gpg
 
-# ----------------------------
+# ----------------------------------------------------
 # (句) Lambda Labs リポジトリの追加
-# ----------------------------
+# ----------------------------------------------------
 RUN printf "\
 deb http://archive.lambdalabs.com/ubuntu $(lsb_release -cs) main\n\
 " > /etc/apt/sources.list.d/lambda.list
@@ -115,38 +127,38 @@ Pin: origin archive.lambdalabs.com\n\
 Pin-Priority: 1001\n\
 " > /etc/apt/preferences.d/lambda
 
-# ----------------------------
+# ----------------------------------------------------
 # (句) lambda-stack-cuda のインストール
-# ----------------------------
+# ----------------------------------------------------
 RUN apt-get update && \
     echo "cudnn cudnn/license_preseed select ACCEPT" | debconf-set-selections && \
     DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-    lambda-stack-cuda && \
+        lambda-stack-cuda && \
     rm -rf /var/lib/apt/lists/*
 
-# ----------------------------
+# ----------------------------------------------------
 # (句) pip の設定変更 (system packages を壊す操作を許可)
-# ----------------------------
+# ----------------------------------------------------
 RUN printf "\
 [global]\n\
 break-system-packages = true\n\
 " > /etc/pip.conf
 
-# ----------------------------
-# (句) NVIDIA Docker 用の環境変数
-# ----------------------------
+# ----------------------------------------------------
+# (句) NVIDIA Docker 用の環境変数を設定
+# ----------------------------------------------------
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV NVIDIA_REQUIRE_CUDA="cuda>=12.4"
 
-# ----------------------------
-# (句) Rust ビルドステージからの成果物をコピー
-# ----------------------------
+# ----------------------------------------------------
+# (句) ビルドステージからの成果物をコピー
+# ----------------------------------------------------
 COPY --from=builder /rust-gnn/target/release/label_propagation     /usr/local/bin/label_propagation
 COPY --from=builder /rust-gnn/target/release/matrix_factorization /usr/local/bin/matrix_factorization
 COPY --from=builder /rust-gnn/target/release/layers               /usr/local/bin/layers
 
-# ----------------------------
-# (句) コンテナ起動時に実行するコマンド
-# ----------------------------
+# ----------------------------------------------------
+# (句) コンテナ起動時のデフォルトコマンド
+# ----------------------------------------------------
 CMD ["/usr/local/bin/layers"]
