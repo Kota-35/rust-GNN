@@ -1,8 +1,9 @@
 use candle_core::{
     DType, Device, Tensor, D
 };
+use std::fs::File;
 use candle_nn::{
-    layer_norm, linear, ops::{softmax, log_softmax}, Activation, AdamW, LayerNorm, LayerNormConfig, Linear, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap
+    embedding, layer_norm, linear, loss::cross_entropy, ops::softmax, Activation, AdamW, Embedding, LayerNorm, LayerNormConfig, Linear, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap
 };
 use rand::{thread_rng, Rng};
 
@@ -56,7 +57,9 @@ impl MultiHeadAttention {
         // 0をかけるのではなく、softmaxを見込んでかさんで実現するのは、計算が軽いとかモチベーションのはず
         let mut mask = vec![0.0f32; n_ctx * n_ctx];
         for i in 0..n_ctx {
-            for j in 0..i {
+            for j in (i+1)..n_ctx { 
+                // 現在の位置 i よりも後ろの位置 j > i がマスク
+                // デルは過去のトークンのみを参照できるようになる
                 mask[i * n_ctx + j] = -1e9;
             }
         }
@@ -64,7 +67,7 @@ impl MultiHeadAttention {
         let mask_batch = mask
             .reshape((1, n_ctx, n_ctx))
             .unwrap()
-            .repeat((n_batch, 1))
+            .repeat((n_batch, 1, 1))
             .unwrap();
 
         let mut qs = vec![];
@@ -185,39 +188,6 @@ impl Layer {
     }
 }
 
-#[derive(Debug)]
-pub struct CustomEmbedding {
-    embeddings: Tensor,
-}
-
-impl CustomEmbedding {
-    pub fn new(
-        num_embeddings: usize,
-        embedding_dim: usize,
-        vb: VarBuilder,
-    ) -> Self {
-        let embeddings = vb.get(
-            (num_embeddings, embedding_dim),
-            "embeddings",
-        ).unwrap();
-        Self {
-            embeddings,
-        }
-    }
-
-    pub fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
-        // テンソルの各シーケンスに対応する埋め込みベクトルを一時的に格納するために使用されます。
-        let mut output = Vec::new();
-        for i in 0..input.dims()[0] {
-            let row = input.get(i).unwrap();
-            let embeddings_row = self.embeddings.index_select(&row, 0)?;
-            output.push(embeddings_row);
-        }
-        Tensor::stack(&output, 0)
-    }
-}
-
-
 
 fn positional_encoding_tensor(
     device: &Device,
@@ -243,7 +213,7 @@ fn positional_encoding_tensor(
 #[derive(Debug)]
 pub struct LanguageModel {
     // Token ID -> d_model次元のベクトルに変換
-    embedding: CustomEmbedding,
+    embedding: Embedding,
     positional_encoding_tensor: Tensor,
     layers: Vec<Layer>,
     output_layer: Linear,
@@ -259,7 +229,7 @@ impl LanguageModel {
             n_batch,
             ..
         } = params;
-        let embedding = CustomEmbedding::new(n_vocab, d_model, vb.pp("embedding"));
+        let embedding = embedding(n_vocab, d_model, vb.pp("embedding")).unwrap();
         let positional_encoding_tensor = positional_encoding_tensor(&device, d_model, n_ctx, n_batch);
 
         let mut layers = vec![];
@@ -302,13 +272,13 @@ pub struct TrainData {
     pub expected_output: Tensor,
 }
 
-fn create_add_binary_exprs(params: HyperParams, device: &Device) -> TrainData {
+fn create_add_binary_exprs(hyper_params: HyperParams, device: &Device) -> TrainData {
     let HyperParams {
         n_ctx,
         n_vocab,
         n_batch,
         ..
-    } = params;
+    } = hyper_params;
     assert!(n_vocab == 7);
     // input
     let mut input = vec![0i64; n_batch * n_ctx];
@@ -316,45 +286,88 @@ fn create_add_binary_exprs(params: HyperParams, device: &Device) -> TrainData {
     let mut rand = thread_rng();
     let max_digits = 12;
     for i in 0..n_batch {
-        // 桁数を1 ~ max_digitsでuniformに持ってきて、その桁数の数をuniformに持ってきて値を作る
-        // uniform
+        // 桁数を1~max_digitsでuniformに持ってきて、その桁数の数をuniformに持ってきて値を作る
+        // 素直にuniformに持ってくると大きい桁数に偏るため
         let a_digits = rand.gen_range(1..=max_digits);
         let a = rand.gen_range((1 << (a_digits - 1))..(1 << a_digits));
         let b_digits = rand.gen_range(1..=max_digits);
         let b = rand.gen_range((1 << (b_digits - 1))..(1 << b_digits));
         let c = a + b;
-        // 数字を書く順番を逆順ではなく普通の順番にしたときは、 `.rev()`を消す
+        // 数字を書く順番を逆順ではなく普通の順番にしたいときは`.rev()`を消す
         let a_s = format!("{:b}", a).chars().rev().collect::<String>();
         let b_s = format!("{:b}", b).chars().rev().collect::<String>();
         let c_s = format!("{:b}", c).chars().rev().collect::<String>();
-        let s = format!("{} + {} = {}", a_s, b_s, c_s);
-        let c_s = s.chars().collect::<Vec<_>>();
-        assert!(c_s.len() < n_ctx);
+        let s = format!("{} + {} = {}.", a_s, b_s, c_s);
+        let cs = s.chars().collect::<Vec<_>>();
+        assert!(cs.len() < n_ctx);
         for k in 0..n_ctx {
-            if k < c_s.len() {
-                input[i * n_ctx + k] = VOCABS.iter().position(|&c| c == c_s[k]).unwrap() as i64;
+            if k < cs.len() {
+                input[i * n_ctx + k] = VOCABS.iter().position(|&c| c == cs[k]).unwrap() as i64;
             } else {
                 // <PAD>
                 input[i * n_ctx + k] = 0;
             }
         }
+        // 期待出力は入力を1ずらして作る
         for k in 0..n_ctx - 1 {
             expected_output[i * n_ctx + k] = input[i * n_ctx + k + 1];
         }
         expected_output[i * n_ctx + (n_ctx - 1)] = 0;
     }
     let input = Tensor::from_vec(input, (n_batch, n_ctx), device).unwrap();
-    let expected_output = Tensor::from_vec(expected_output, (n_batch * n_ctx,), device).unwrap();
+    let expected_output = Tensor::from_vec(expected_output, n_batch * n_ctx, device).unwrap();
     TrainData {
         input,
         expected_output,
     }
 }
 
+
+// ヘルパー関数: トークンIDを文字列に変換
+fn tokens_to_string(tokens: &[i64]) -> String {
+    tokens.iter()
+        .map(|&x| VOCABS.get(x as usize).unwrap_or(&'_'))
+        .collect()
+}
+
+// データを表示する関数（index_selectを使用せず）
+fn print_train_data(
+    train_data: &TrainData,
+    n_ctx: usize,
+    n_batch: usize,
+    num_samples: usize,
+) {
+    // expected_output のテンソルを [n_batch, n_ctx] に再構成
+    let expected_output = train_data.expected_output.reshape((n_batch, n_ctx)).unwrap();
+    
+    // input のテンソルを [n_batch, n_ctx] に再構成
+    let input = train_data.input.reshape((n_batch, n_ctx)).unwrap();
+
+    // テンソルを2次元ベクターに変換
+    let input_vec = input.to_vec2::<i64>().unwrap();
+    let expected_output_vec = expected_output.to_vec2::<i64>().unwrap();
+
+    for i in 0..num_samples.min(n_batch) {
+        // 各サンプルの入力シーケンスと期待される出力シーケンスを取得
+        let input_seq = &input_vec[i];
+        let expected_output_seq = &expected_output_vec[i];
+
+        // トークンIDを文字列に変換
+        let input_str = tokens_to_string(input_seq);
+        let expected_output_str = tokens_to_string(expected_output_seq);
+
+        println!("Sample {}:", i + 1);
+        println!("  Input:           {}", input_str);
+        println!("  Expected Output: {}", expected_output_str);
+        println!();
+    }
+}
+
+
 fn main() {
     // デバイス
-    let device = Device::new_metal(0).unwrap();
-    println!("device = {:?}", device);
+    let device = Device::cuda_if_available(0).unwrap();
+    println!("device: {:?}", device);
     // パラメータ
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
@@ -383,10 +396,13 @@ fn main() {
     let model = LanguageModel::new(&device, params, &vb);
     
     // optimizer
-    let opt_params = ParamsAdamW::default();
-    let mut optimizer = AdamW::new(var_map.all_vars(), opt_params).unwrap();
+    let mut optimizer = AdamW::new(var_map.all_vars(), ParamsAdamW { lr: 1e-3, ..Default::default() }).unwrap();
 
     // 学習ループ
+    // ログファイルを作成
+    let mut log_file = File::create("training_log.txt").unwrap();
+    use std::io::Write;
+
     for iter in 0..MAX_ITER {
         // 　学習データ準備
         let TrainData {
@@ -394,25 +410,27 @@ fn main() {
             expected_output,
         } = create_add_binary_exprs(params, &device);
 
+        // データ確認（最初のイテレーションのみ表示）
+        if iter == 0 {
+            println!("=== Training Data Samples ===");
+            print_train_data(&TrainData { input: input.clone(), expected_output: expected_output.clone() }, n_ctx, n_batch, 5);
+            println!("==============================\n");
+        }
+
         // forward
         let output = model.forward(&input).unwrap();
 
         // cross entropy loss
         // Alternative manual cross-entropy loss calculation (no gather)
         let output = output.reshape((n_batch * n_ctx, n_vocab)).unwrap();
-        let log_softmax_output = log_softmax(&output, D::Minus1).unwrap();
-        let indices = expected_output.to_vec1::<i64>().unwrap();
-        let mut losses = Vec::new();
-        for i in 0..log_softmax_output.dims()[0] {
-            let log_prob = log_softmax_output.get(i).unwrap().get(indices[i] as usize).unwrap().to_scalar::<f32>().unwrap();
-            losses.push(-log_prob);
-        }
-        let loss = Tensor::from_vec(losses, &[n_batch * n_ctx], &device).unwrap().mean(0).unwrap();
+        let loss = cross_entropy(&output, &expected_output).unwrap();
         let loss_f32 = loss.to_scalar::<f32>().unwrap();
-        eprintln!("iter = {}, loss = {}", iter, loss_f32);
+        let log_str = format!("iter = {}, loss = {}\n", iter, loss_f32);
+        log_file.write_all(log_str.as_bytes()).unwrap();
+        eprint!("{}", log_str);
 
         // 時々性能を表示
-        if iter % 100 == 99 {
+        if iter % 10 == 5 {
             eprintln!("--------------------------------- iter = {} ---------------------------------", iter);
             let output_softmax = softmax(&output, candle_core::D::Minus1).unwrap();
             let output_softmax_argmax = output_softmax.argmax(candle_core::D::Minus1).unwrap();
@@ -424,7 +442,7 @@ fn main() {
             let input_vec = input
                 .reshape(n_batch * n_ctx)
                 .unwrap()
-                .to_vec1::<i64 >()
+                .to_vec1::<i64>()
                 .unwrap();
 
             let mut count = 0;
@@ -460,11 +478,13 @@ fn main() {
             eprintln!();
         }
 
+        // 勾配計算 
         loss.backward().unwrap();
-        optimizer.backward_step(&loss).unwrap();
 
+        // パラメータ更新
+        optimizer.backward_step(&loss).unwrap();
     }
+
     // モデルの保存
     var_map.save("model.bin").unwrap();
-
 }
